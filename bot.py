@@ -61,7 +61,7 @@ async def db():
         );
         """)
 
-        # ПРОСТОЕ РЕШЕНИЕ (без багов)
+        # СБРОС settings КАЖДЫЙ ЗАПУСК
         await conn.execute("DROP TABLE IF EXISTS settings;")
 
         await conn.execute("""
@@ -155,12 +155,12 @@ async def main_text(user_id):
     status = "🟢 В работе" if is_work_time(work_time) else "🔴 Стоп работа"
 
     return f"""
-Приветствуем вас в сервисе MaxUp!
+Приветствуем в MaxUp!
 
-• <b>ID:</b> <code>{user_id}</code>
-• <b>Баланс:</b> <code>{balance}</code>
-• <b>Цена:</b> <code>{price}$</code>
-• <b>Статус:</b> {status}
+ID: <code>{user_id}</code>
+Баланс: <code>{balance}</code>
+Цена: <code>{price}$</code>
+Статус: {status}
 """
 
 def sub_text():
@@ -211,6 +211,70 @@ async def save_number(msg: Message, state: FSMContext):
 
     await state.clear()
     await msg.answer("Принято", reply_markup=menu_kb())
+
+# --- ADMIN ---
+@dp.message(Command("admin"))
+async def admin(msg: Message):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    await msg.answer("Админка", reply_markup=admin_kb())
+
+@dp.callback_query(F.data == "price")
+async def set_price(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminStates.price)
+    await call.message.edit_text("Введите цену", reply_markup=back_kb())
+
+@dp.message(AdminStates.price)
+async def save_price(msg: Message, state: FSMContext):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE settings SET price=$1 WHERE id=1", float(msg.text))
+    await state.clear()
+    await msg.answer("Готово", reply_markup=admin_kb())
+
+@dp.callback_query(F.data == "work")
+async def set_time(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminStates.time)
+    await call.message.edit_text("Введите время 7:00-20:00", reply_markup=back_kb())
+
+@dp.message(AdminStates.time)
+async def save_time(msg: Message, state: FSMContext):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE settings SET work_time=$1 WHERE id=1", msg.text)
+    await state.clear()
+    await msg.answer("Готово", reply_markup=admin_kb())
+
+@dp.callback_query(F.data == "botstats")
+async def bot_stats(call: CallbackQuery):
+    async with pool.acquire() as conn:
+        users = await conn.fetchval("SELECT COUNT(*) FROM users")
+        active = await conn.fetchval("SELECT COUNT(DISTINCT user_id) FROM numbers")
+
+    await call.message.edit_text(
+        f"Пользователей: {users}\nСдали номер: {active}",
+        reply_markup=back_kb()
+    )
+
+@dp.callback_query(F.data == "report")
+async def report(call: CallbackQuery):
+    tz = pytz.timezone("Europe/Moscow")
+    today = datetime.now(tz).date()
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+        SELECT u.username, n.number, n.price
+        FROM numbers n
+        JOIN users u ON u.id = n.user_id
+        WHERE DATE(n.created_at) = $1
+        """, today)
+
+    text = ""
+    for r in rows:
+        text += f"@{r['username']}\n{r['number']} - {r['price']}$\n\n"
+
+    with open("report.txt", "w") as f:
+        f.write(text)
+
+    await bot.send_document(call.from_user.id, FSInputFile("report.txt"))
 
 @dp.callback_query(F.data == "back_menu")
 async def back(call: CallbackQuery, state: FSMContext):
