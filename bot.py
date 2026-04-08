@@ -10,6 +10,7 @@ from aiogram.filters import Command
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.client.default import DefaultBotProperties
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
@@ -19,9 +20,12 @@ CHANNEL_2 = os.getenv("CHANNEL_2")
 CHANNEL_1_LINK = os.getenv("CHANNEL_1_LINK")
 CHANNEL_2_LINK = os.getenv("CHANNEL_2_LINK")
 
-bot = Bot(BOT_TOKEN, parse_mode="HTML")
-dp = Dispatcher(storage=MemoryStorage())
+bot = Bot(
+    BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode="HTML")
+)
 
+dp = Dispatcher(storage=MemoryStorage())
 pool = None
 
 # --- FSM ---
@@ -39,7 +43,6 @@ async def db():
 
     async with pool.acquire() as conn:
 
-        # users
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS users(
             id BIGINT PRIMARY KEY,
@@ -48,7 +51,6 @@ async def db():
         );
         """)
 
-        # numbers
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS numbers(
             id SERIAL PRIMARY KEY,
@@ -59,34 +61,20 @@ async def db():
         );
         """)
 
-        # settings (создание)
+        # ПРОСТОЕ РЕШЕНИЕ (без багов)
+        await conn.execute("DROP TABLE IF EXISTS settings;")
+
         await conn.execute("""
-        CREATE TABLE IF NOT EXISTS settings(
+        CREATE TABLE settings(
             id INT PRIMARY KEY,
             price FLOAT,
             work_time TEXT
         );
         """)
 
-        # --- ВАЖНО: проверка колонки id ---
-        col = await conn.fetch("""
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_name='settings'
-        """)
-
-        cols = [c["column_name"] for c in col]
-
-        if "id" not in cols:
-            await conn.execute("ALTER TABLE settings ADD COLUMN id INT;")
-            await conn.execute("UPDATE settings SET id=1 WHERE id IS NULL;")
-            await conn.execute("ALTER TABLE settings ADD PRIMARY KEY (id);")
-
-        # вставка дефолта
         await conn.execute("""
         INSERT INTO settings (id, price, work_time)
-        VALUES (1, 4.5, '7:00-20:00')
-        ON CONFLICT (id) DO NOTHING;
+        VALUES (1, 4.5, '7:00-20:00');
         """)
 
 # --- UTILS ---
@@ -169,24 +157,21 @@ async def main_text(user_id):
     return f"""
 Приветствуем вас в сервисе MaxUp!
 
-• <b>Ваш ID:</b> <code>{user_id}</code>
+• <b>ID:</b> <code>{user_id}</code>
 • <b>Баланс:</b> <code>{balance}</code>
-• <b>Актуальная цена:</b> <code>{price}$</code>
+• <b>Цена:</b> <code>{price}$</code>
 • <b>Статус:</b> {status}
-
-Выберите действие:
 """
 
 def sub_text():
     return f"""
-🗝️ Для использования бота необходимо подписаться на следующие сообщества:
+Подпишись:
 
-<a href="{CHANNEL_1_LINK}">Новостной канал</a>
-<a href="{CHANNEL_2_LINK}">Канал выплат</a>
+<a href="{CHANNEL_1_LINK}">Канал 1</a>
+<a href="{CHANNEL_2_LINK}">Канал 2</a>
 """
 
 # --- HANDLERS ---
-
 @dp.message(Command("start"))
 async def start(msg: Message):
     await add_user(msg.from_user)
@@ -201,18 +186,14 @@ async def sub_check(call: CallbackQuery):
     if await check_sub(call.from_user.id):
         await call.message.edit_text(await main_text(call.from_user.id), reply_markup=menu_kb())
     else:
-        await call.answer("Вы не подписались на все сообщества", show_alert=True)
-
-@dp.callback_query(F.data == "profile")
-async def profile(call: CallbackQuery):
-    await call.message.edit_text(await main_text(call.from_user.id), reply_markup=back_kb())
+        await call.answer("Не подписан", show_alert=True)
 
 @dp.callback_query(F.data == "send")
 async def send(call: CallbackQuery, state: FSMContext):
     price, work_time = await get_settings()
 
     if not is_work_time(work_time):
-        await call.answer(f"Конец рабочего дня. Стартворк с {work_time}", show_alert=True)
+        await call.answer(f"Работа с {work_time}", show_alert=True)
         return
 
     await state.set_state(UserStates.number)
@@ -230,81 +211,6 @@ async def save_number(msg: Message, state: FSMContext):
 
     await state.clear()
     await msg.answer("Принято", reply_markup=menu_kb())
-
-@dp.callback_query(F.data == "stats")
-async def user_stats(call: CallbackQuery):
-    async with pool.acquire() as conn:
-        count = await conn.fetchval("SELECT COUNT(*) FROM numbers WHERE user_id=$1", call.from_user.id)
-    await call.message.edit_text(f"Вы сдали номеров: <code>{count}</code>", reply_markup=back_kb())
-
-@dp.callback_query(F.data == "about")
-async def about(call: CallbackQuery):
-    await call.message.edit_text("О проекте MaxUp...", reply_markup=back_kb())
-
-# --- ADMIN ---
-
-@dp.message(Command("admin"))
-async def admin(msg: Message):
-    if msg.from_user.id != ADMIN_ID:
-        return
-    await msg.answer("Админ панель", reply_markup=admin_kb())
-
-@dp.callback_query(F.data == "price")
-async def set_price(call: CallbackQuery, state: FSMContext):
-    await state.set_state(AdminStates.price)
-    await call.message.edit_text("Введите цену", reply_markup=back_kb())
-
-@dp.message(AdminStates.price)
-async def save_price(msg: Message, state: FSMContext):
-    async with pool.acquire() as conn:
-        await conn.execute("UPDATE settings SET price=$1 WHERE id=1", float(msg.text))
-    await state.clear()
-    await msg.answer("Готово", reply_markup=admin_kb())
-
-@dp.callback_query(F.data == "work")
-async def set_time(call: CallbackQuery, state: FSMContext):
-    await state.set_state(AdminStates.time)
-    await call.message.edit_text("Введите время 7:00-20:00", reply_markup=back_kb())
-
-@dp.message(AdminStates.time)
-async def save_time(msg: Message, state: FSMContext):
-    async with pool.acquire() as conn:
-        await conn.execute("UPDATE settings SET work_time=$1 WHERE id=1", msg.text)
-    await state.clear()
-    await msg.answer("Готово", reply_markup=admin_kb())
-
-@dp.callback_query(F.data == "botstats")
-async def bot_stats(call: CallbackQuery):
-    async with pool.acquire() as conn:
-        users = await conn.fetchval("SELECT COUNT(*) FROM users")
-        active = await conn.fetchval("SELECT COUNT(DISTINCT user_id) FROM numbers")
-
-    await call.message.edit_text(
-        f"Пользователей: <code>{users}</code>\nСдали номер: <code>{active}</code>",
-        reply_markup=back_kb()
-    )
-
-@dp.callback_query(F.data == "report")
-async def report(call: CallbackQuery):
-    tz = pytz.timezone("Europe/Moscow")
-    today = datetime.now(tz).date()
-
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-        SELECT u.username, n.number, n.price
-        FROM numbers n
-        JOIN users u ON u.id = n.user_id
-        WHERE DATE(n.created_at) = $1
-        """, today)
-
-    text = ""
-    for r in rows:
-        text += f"@{r['username']}\n{r['number']} - {r['price']}$\n\n"
-
-    with open("report.txt", "w") as f:
-        f.write(text)
-
-    await bot.send_document(call.from_user.id, FSInputFile("report.txt"))
 
 @dp.callback_query(F.data == "back_menu")
 async def back(call: CallbackQuery, state: FSMContext):
