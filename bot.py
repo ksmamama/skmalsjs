@@ -38,6 +38,8 @@ async def db():
     pool = await asyncpg.create_pool(os.getenv("DATABASE_URL"))
 
     async with pool.acquire() as conn:
+
+        # users
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS users(
             id BIGINT PRIMARY KEY,
@@ -46,6 +48,7 @@ async def db():
         );
         """)
 
+        # numbers
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS numbers(
             id SERIAL PRIMARY KEY,
@@ -56,6 +59,7 @@ async def db():
         );
         """)
 
+        # settings (создание)
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS settings(
             id INT PRIMARY KEY,
@@ -64,10 +68,25 @@ async def db():
         );
         """)
 
+        # --- ВАЖНО: проверка колонки id ---
+        col = await conn.fetch("""
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name='settings'
+        """)
+
+        cols = [c["column_name"] for c in col]
+
+        if "id" not in cols:
+            await conn.execute("ALTER TABLE settings ADD COLUMN id INT;")
+            await conn.execute("UPDATE settings SET id=1 WHERE id IS NULL;")
+            await conn.execute("ALTER TABLE settings ADD PRIMARY KEY (id);")
+
+        # вставка дефолта
         await conn.execute("""
         INSERT INTO settings (id, price, work_time)
         VALUES (1, 4.5, '7:00-20:00')
-        ON CONFLICT DO NOTHING;
+        ON CONFLICT (id) DO NOTHING;
         """)
 
 # --- UTILS ---
